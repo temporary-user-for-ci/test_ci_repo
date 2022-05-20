@@ -1,0 +1,119 @@
+version: 2.1
+
+parameters:
+  GHA_Actor:
+    type: string
+    default: ""
+  GHA_Action:
+    type: string
+    default: ""
+  GHA_Event:
+    type: string
+    default: ""
+  GHA_Meta:
+    type: string
+    default: ""
+
+executors:
+  default:
+    machine:
+      enabled: true
+      image: ubuntu-2004:202111-02
+
+commands:
+  restore_docker:
+    steps:
+      - run: echo ${CACHE_VERSION} > cache_version
+      - restore_cache:
+          key: docker--{{checksum "cache_version" }}--{{ checksum "docker-compose.yml" }}--{{ checksum "Dockerfile" }}--{{ checksum "Gemfile.lock" }}
+          paths:
+            - ~/caches/images.tar
+
+  save_docker:
+    steps:
+      - run: echo ${CACHE_VERSION} > cache_version
+      - save_cache:
+          key: docker--{{checksum "cache_version" }}--{{ checksum "docker-compose.yml" }}--{{ checksum "Dockerfile" }}--{{ checksum "Gemfile.lock" }}
+          paths:
+            - ~/caches/images.tar
+
+jobs:
+  build:
+    executor: default
+    steps:
+      - checkout
+      - run: make .env
+      - restore_docker
+      - run:
+          name: Setup docker
+          command: |
+            if [[ ! -f ~/caches/images.tar ]]; then
+              make build
+              docker-compose pull mysql redis memcache minio
+              mkdir -p ~/caches
+              docker save $(docker images | awk 'NR>=2 && ! /^<none>/{print $1}') -o ~/caches/images.tar
+            fi
+      - save_docker
+
+  test:
+    executor: default
+    environment:
+      COMPOSE_PROJECT_NAME: api_domain
+      NETWORK_NAME: api_domain_default
+      CIRCLE_TEST_REPORTS: ~/reports
+      CIRCLE_ARTIFACTS: ~/coverage
+    steps:
+      - checkout
+      - run: make .env
+      - restore_docker
+      - run:
+          name: Load docker
+          command: |
+            if [[ -e ~/caches/images.tar ]]; then
+              docker load -i ~/caches/images.tar
+            fi
+      - run: docker-compose up -d mysql elasticsearch
+      - run:
+          name: Waiting launch containers
+          command: |
+            docker run --network ${NETWORK_NAME} jwilder/dockerize -wait tcp://mysql:3306 -timeout 3m -wait-retry-interval 5s
+            docker run --network ${NETWORK_NAME} jwilder/dockerize -wait tcp://elasticsearch:9200 -timeout 3m -wait-retry-interval 5s
+      - run: make setup_test
+      - run: make test
+      - store_test_results:
+          path: ~/reports
+      - store_artifacts:
+          path: ~/coverage
+
+  bundle_update:
+    docker:
+      - image: circleci/ruby:2.5.8
+    steps:
+      - checkout
+      - run:
+          name: bundle update
+          command: |
+            gem update bundler -N
+            gem install circleci-bundle-update-pr -N
+            circleci-bundle-update-pr ${BUNDLE_UPDATE_GITHUB_USERNAME} ${BUNDLE_UPDATE_GITHUB_EMAIL}
+
+workflows:
+  version: 2.1
+  build_and_test:
+    when: << pipeline.parameters.GHA_Action >>
+    jobs:
+      - build
+      - test:
+          requires:
+            - build
+
+  auto_bundle_update:
+    triggers:
+      - schedule:
+          cron: "0 1 * * 1"
+          filters:
+            branches:
+              only:
+                - master
+    jobs:
+      - bundle_update

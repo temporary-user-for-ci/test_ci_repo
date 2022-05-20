@@ -1,0 +1,13 @@
+on:
+  push:
+    branches:
+      - master
+jobs:
+  trigger-circleci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: CircleCI-Public/trigger-circleci-pipeline-action@v1.0
+        id: trigger_circleci_job
+        name: Trigger exiting circleci job
+        env:
+          CCI_TOKEN: ${{ secrets.CCI_TOKEN }}
